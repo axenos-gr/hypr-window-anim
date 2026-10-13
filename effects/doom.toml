@@ -1,0 +1,7 @@
+# Doom's screen melt.
+duration_ms = 900
+padding = 0
+
+[params]
+column = 8.0                # column width, logical px
+spread = 0.35               # how far apart the columns start, part of the duration

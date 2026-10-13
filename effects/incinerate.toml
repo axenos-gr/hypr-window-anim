@@ -1,0 +1,9 @@
+# Paper burn: the window chars and burns away, ash and embers drift up.
+duration_ms = 1400
+padding = 180               # room for rising ash, logical px
+
+[params]
+color = "rgb(255, 120, 30)" # flames and embers
+ash_color = "rgb(175, 170, 162)"
+ash = 1.0                   # particle density, 0 disables
+scale = 1.0                 # size of the burn pattern

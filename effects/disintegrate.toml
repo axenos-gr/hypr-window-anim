@@ -1,0 +1,8 @@
+# The window crumbles into grains of itself that blow away.
+duration_ms = 1300
+padding = 220               # room for flying dust, logical px
+
+[params]
+color = "rgba(150, 138, 125, 0.7)" # dust tint; alpha sets how strongly grains fade into it
+grain = 5.0                 # grain size, logical px
+wind = 1.0                  # how far the dust flies

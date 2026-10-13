@@ -1,0 +1,9 @@
+# Defaults from Burn-My-Windows (tv-glitch-* keys).
+duration_ms = 750
+padding = 0
+
+[params]
+color = "rgb(100, 160, 255)"
+scale = 1.0
+strength = 2.0
+speed = 2.0

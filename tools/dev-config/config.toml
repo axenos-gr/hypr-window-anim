@@ -1,0 +1,33 @@
+# ~/.config/hypr-window-anim/config.toml
+
+[general]
+enabled = true
+default_effect = "tv-glitch"
+hold_layout = true          # WM-requested closes wait for the effect before the tile is freed
+app_close_effects = true    # also animate windows closed by the app itself (no hold)
+close_timeout_ms = 1500     # bring the window back if it hasn't closed by then
+max_concurrent = 6
+open_effects = true         # play an effect when windows appear
+open_effect = "tv-glitch"   # replaces Hyprland's windowsIn/fadeIn for animated windows
+
+# Per-effect overrides. Params map to uniforms: strength -> uStrength.
+[effects.tv-glitch]
+duration_ms = 750
+padding = 0
+
+[effects.tv-glitch.params]
+color = "rgb(100, 160, 255)"
+scale = 1.0
+strength = 2.0
+speed = 2.0
+
+# Rules: first match wins. Keys: class, title (regex), floating, xwayland,
+# effect ("none" disables), duration_ms, hold, open_effect, open_duration_ms.
+# [[rules]]
+# class = "^(kitty)$"
+# duration_ms = 500
+#
+# [[rules]]
+# class = "^(rofi)$"
+# effect = "none"
+# open_effect = "none"
