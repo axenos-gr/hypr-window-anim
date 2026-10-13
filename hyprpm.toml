@@ -1,0 +1,12 @@
+[repository]
+name = "hypr-window-anim"
+authors = ["axenos"]
+
+[hypr-window-anim]
+description = "Shader close animations with delayed layout reflow"
+authors = ["axenos"]
+output = "build/hypr-window-anim.so"
+build = [
+    "cmake -B build -DCMAKE_BUILD_TYPE=Release -DHWA_BUILD_TESTS=OFF",
+    "cmake --build build --target hwa-plugin",
+]

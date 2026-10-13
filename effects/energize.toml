@@ -1,0 +1,7 @@
+# Transporter beam: shimmering light and sparkles.
+duration_ms = 1100
+padding = 0
+
+[params]
+color = "rgb(120, 190, 255)" # beam
+sparkle = 7.0               # sparkle size, logical px

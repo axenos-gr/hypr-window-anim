@@ -1,0 +1,7 @@
+# The window spirals into a black hole.
+duration_ms = 900
+padding = 30                # room for the accretion glow, logical px
+
+[params]
+color = "rgb(255, 170, 80)" # accretion glow
+twist = 1.2                 # turns of the spiral

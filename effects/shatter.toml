@@ -1,0 +1,9 @@
+# Glass: cracks spread from an impact point, then the shards fly apart and fall.
+duration_ms = 1100
+padding = 200               # room for flying shards, logical px
+
+[params]
+color = "rgba(235, 245, 255, 0.8)" # cracks and shard rims
+shards = 13.0               # radial cracks around the impact
+blow = 0.7                  # how hard shards fly outwards
+gravity = 1.0

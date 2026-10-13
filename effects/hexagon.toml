@@ -1,0 +1,7 @@
+# Hexagons shrink away in a wave, outlines glowing.
+duration_ms = 900
+padding = 0
+
+[params]
+color = "rgb(90, 200, 255)" # outline glow
+hex = 36.0                  # hexagon size, logical px
