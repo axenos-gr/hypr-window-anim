@@ -17,8 +17,8 @@ namespace hwa::plugin {
         float strength      = 1.F; // live blur radius factor; Hyprland passes the window alpha
     };
 
-    // Mirrors IHyprRenderer::shouldBlur and drawSurface; call while the window is mapped
-    SWindowBlur windowBlurFor(PHLWINDOW w);
+    // Mirrors shouldBlur and drawSurface; ignoreNoBlur skips our own opening override
+    SWindowBlur windowBlurFor(PHLWINDOW w, bool ignoreNoBlur = false);
 
     // During rendering; behind = FB holding what's under the window, for live blur
     SP<Render::ITexture> blurTextureFor(const SWindowBlur& b, PHLMONITOR mon, SP<Render::IFramebuffer> behind);

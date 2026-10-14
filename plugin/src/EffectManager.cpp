@@ -4,6 +4,7 @@
 #include "Plugin.hpp"
 
 #include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/output/Monitor.hpp>
@@ -150,6 +151,15 @@ namespace hwa::plugin {
         e->durationS          = resolved.durationMs / 1000.F;
         e->box                = e->liveBox().value_or(CBox{});
 
+        // we draw its blur; spare Hyprland's per-frame live blur and matte pass
+        if (windowBlurFor(w).enabled) {
+            auto& noBlur = w->m_ruleApplicator->noBlur();
+            if (noBlur.hasValue() && noBlur.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
+                e->savedNoBlur = noBlur.value();
+            noBlur.set(true, Desktop::Types::PRIORITY_SET_PROP);
+            e->ownsNoBlur = true;
+        }
+
         auto transformer = makeUnique<COpenTransformer>(e);
         e->transformer   = transformer.get();
         w->m_transformers.emplace_back(std::move(transformer));
@@ -216,7 +226,16 @@ namespace hwa::plugin {
             if (const auto live = e.liveBox())
                 g_pHyprRenderer->damageBox(*live);
             std::erase_if(w->m_transformers, [&e](const auto& t) { return t.get() == e.transformer; });
+
+            if (e.ownsNoBlur) {
+                auto& noBlur = w->m_ruleApplicator->noBlur();
+                if (e.savedNoBlur)
+                    noBlur.set(*e.savedNoBlur, Desktop::Types::PRIORITY_SET_PROP);
+                else
+                    noBlur.unset(Desktop::Types::PRIORITY_SET_PROP);
+            }
         }
+        e.ownsNoBlur = false;
         e.transformer = nullptr;
     }
 
@@ -252,6 +271,13 @@ namespace hwa::plugin {
             g_pHyprRenderer->damageBox(e->box);
             if (std::ranges::find(monitors, mon) == monitors.end())
                 monitors.push_back(mon);
+
+            // Hyprland refreshes its precomputed blur only for visible blurred windows; ours are
+            // hidden or no_blur while we draw that blur, so ask for it the way preRender does
+            if (e->blur.enabled && e->blur.precomputed && mon->m_blurFBDirty && !mon->m_blurFBShouldRender) {
+                mon->m_blurFBShouldRender = true;
+                g_pHyprRenderer->damageMonitor(mon);
+            }
         }
 
         for (const auto& m : monitors)

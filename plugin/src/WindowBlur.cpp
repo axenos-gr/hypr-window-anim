@@ -11,7 +11,7 @@
 #include <hyprland/src/render/Renderer.hpp>
 
 namespace hwa::plugin {
-    SWindowBlur windowBlurFor(PHLWINDOW w) {
+    SWindowBlur windowBlurFor(PHLWINDOW w, bool ignoreNoBlur) {
         SWindowBlur b;
         if (!w)
             return b;
@@ -25,7 +25,7 @@ namespace hwa::plugin {
 
         // IHyprRenderer::shouldBlur (protected)
         const auto& rules = w->m_ruleApplicator;
-        if (rules->noBlur().valueOrDefault() || rules->RGBX().valueOrDefault() || w->opaque())
+        if ((!ignoreNoBlur && rules->noBlur().valueOrDefault()) || rules->RGBX().valueOrDefault() || w->opaque())
             return b;
 
         const auto surface = w->wlSurface();
