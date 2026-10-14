@@ -59,15 +59,23 @@ namespace hwa::plugin {
 
             const CBox local = box->copy().translate(-mon->m_position).scale(mon->m_scale);
 
-            // our own blur underneath: opaque output defeats Hyprland's darkening blend
-            m_effect->blur = windowBlurFor(w);
+            // our own blur underneath; Hyprland's is off for the effect (see startOpen)
+            m_effect->blur = windowBlurFor(w, m_effect->ownsNoBlur);
             m_effect->blur.surface.translate(m_effect->liveOffset());
             auto blurTex = blurTextureFor(m_effect->blur, mon, m_behind.lock());
 
-            auto guard = g_pHyprRenderer->bindTempFB(out);
-            g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
-            // the work buffer already holds the window where it is drawn; no render modifs
-            drawEffectQuad(*m_effect, in->getTexture(), local, false, false, blurDrawFor(m_effect->blur, std::move(blurTex), *box, mon->m_scale));
+            // all of `out` reaches the screen; the nested pass shrank damage to the window box
+            auto&         rd    = g_pHyprRenderer->m_renderData;
+            const CRegion saved = rd.damage;
+            rd.damage           = CRegion{0, 0, mon->m_transformedSize.x, mon->m_transformedSize.y};
+
+            {
+                auto guard = g_pHyprRenderer->bindTempFB(out);
+                g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
+                // the work buffer already holds the window where it is drawn; no render modifs
+                drawEffectQuad(*m_effect, in->getTexture(), local, false, false, blurDrawFor(m_effect->blur, std::move(blurTex), *box, mon->m_scale));
+            }
+            rd.damage = saved;
 
             result = out;
         });

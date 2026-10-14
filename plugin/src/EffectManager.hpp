@@ -40,6 +40,8 @@ namespace hwa::plugin {
         PHLWINDOWREF                 window;
         Render::IWindowTransformer*  transformer = nullptr;
         double                       padding     = 0.0;
+        bool                         ownsNoBlur  = false;  // we set no_blur so Hyprland skips its live blur
+        std::optional<bool>          savedNoBlur;          // the setprop value we replaced
 
         uint32_t                 frames = 0; // diagnostics
         Time::steady_tp          lastFrame;
