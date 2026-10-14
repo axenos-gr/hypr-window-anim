@@ -34,9 +34,15 @@ namespace hwa::plugin {
         if (!w)
             return std::nullopt;
 
-        const auto     ws     = w->m_workspace;
-        const Vector2D offset = (w->m_pinned || !ws ? Vector2D{} : ws->m_renderOffset->value()) + w->m_floatingOffset;
-        return w->getFullWindowBoundingBox().translate(offset).expand(padding);
+        return w->getFullWindowBoundingBox().translate(liveOffset()).expand(padding);
+    }
+
+    Vector2D SEffect::liveOffset() const {
+        const auto w = window.lock();
+        if (!w)
+            return {};
+        const auto ws = w->m_workspace;
+        return (w->m_pinned || !ws ? Vector2D{} : ws->m_renderOffset->value()) + w->m_floatingOffset;
     }
 
     std::expected<SP<SProgram>, std::string> CEffectManager::programFor(const std::string& name, SEffectSource& outSrc) {
@@ -95,6 +101,7 @@ namespace hwa::plugin {
         e->box                = full.copy().expand(resolved.padding);
         e->paddingLogical     = resolved.padding + std::max(0.0, contentX - full.x);
         e->fullscreen         = Fullscreen::controller()->isFullscreen(w);
+        e->blur               = windowBlurFor(w);
         e->seed               = std::uniform_real_distribution<float>{0.F, 1.F}(rng);
         e->start              = Time::steadyNow();
         e->durationS          = resolved.durationMs / 1000.F;

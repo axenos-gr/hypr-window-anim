@@ -59,15 +59,24 @@ namespace hwa::plugin {
 
             const CBox local = box->copy().translate(-mon->m_position).scale(mon->m_scale);
 
-            auto       guard = g_pHyprRenderer->bindTempFB(out);
+            // our own blur underneath: opaque output defeats Hyprland's darkening blend
+            m_effect->blur = windowBlurFor(w);
+            m_effect->blur.surface.translate(m_effect->liveOffset());
+            auto blurTex = blurTextureFor(m_effect->blur, mon, m_behind.lock());
+
+            auto guard = g_pHyprRenderer->bindTempFB(out);
             g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
             // the work buffer already holds the window where it is drawn; no render modifs
-            drawEffectQuad(*m_effect, in->getTexture(), local, false, false);
+            drawEffectQuad(*m_effect, in->getTexture(), local, false, false, blurDrawFor(m_effect->blur, std::move(blurTex), *box, mon->m_scale));
 
             result = out;
         });
 
         return result;
+    }
+
+    void COpenTransformer::preWindowRender(CSurfacePassElement::SRenderData* pRenderData) {
+        m_behind = g_pHyprRenderer->m_renderData.currentFB;
     }
 
     namespace {

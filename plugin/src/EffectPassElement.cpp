@@ -8,7 +8,7 @@
 
 namespace hwa::plugin {
     // Mirrors CHyprOpenGLImpl::renderTextureInternal
-    void drawEffectQuad(SEffect& e, SP<Render::ITexture> tex, const CBox& box, bool flipEndFrame, bool applyRenderModif) {
+    void drawEffectQuad(SEffect& e, SP<Render::ITexture> tex, const CBox& box, bool flipEndFrame, bool applyRenderModif, const SBlurDraw& blur) {
         auto&       rd  = g_pHyprRenderer->m_renderData;
         const auto  mon = rd.pMonitor.lock();
         const auto& gl  = Render::GL::g_pHyprOpenGL;
@@ -71,6 +71,17 @@ namespace hwa::plugin {
         set("uForOpening", [&](GLint l) { glUniform1i(l, e.forOpening ? 1 : 0); });
         set("uIsFullscreen", [&](GLint l) { glUniform1i(l, e.fullscreen ? 1 : 0); });
 
+        set("hwaBlur", [&](GLint l) { glUniform1i(l, blur.tex ? 1 : 0); });
+        if (blur.tex) {
+            glActiveTexture(GL_TEXTURE1);
+            blur.tex->bind();
+            glActiveTexture(GL_TEXTURE0);
+            set("hwaBlurTex", [](GLint l) { glUniform1i(l, 1); });
+            set("hwaBlurRect", [&](GLint l) { glUniform4f(l, blur.rect.x, blur.rect.y, blur.rect.w, blur.rect.h); });
+            set("hwaBlurRound", [&](GLint l) { glUniform2f(l, blur.radius, blur.power); });
+            set("hwaBlurAlpha", [&](GLint l) { glUniform1f(l, blur.alpha); });
+        }
+
         for (const auto& [name, value] : e.params)
             P.setParam(name, value);
 
@@ -85,6 +96,11 @@ namespace hwa::plugin {
         gl->scissor(nullptr);
         glBindVertexArray(0);
         tex->unbind();
+        if (blur.tex) {
+            glActiveTexture(GL_TEXTURE1);
+            blur.tex->unbind();
+            glActiveTexture(GL_TEXTURE0);
+        }
 
         g_pHyprRenderer->popMonitorTransformEnabled();
     }
@@ -97,8 +113,10 @@ namespace hwa::plugin {
             if (!m_effect || !m_effect->snapshot || !mon || g_pHyprRenderer->m_bRenderingSnapshot)
                 return;
 
-            const CBox local = m_effect->box.copy().translate(-mon->m_position).scale(mon->m_scale);
-            drawEffectQuad(*m_effect, m_effect->snapshot->getTexture(), local, true, true);
+            // the snapshot has no blur (Hyprland skips it for snapshots): add it back
+            auto       blurTex = blurTextureFor(m_effect->blur, mon, g_pHyprRenderer->m_renderData.currentFB);
+            const CBox local   = m_effect->box.copy().translate(-mon->m_position).scale(mon->m_scale);
+            drawEffectQuad(*m_effect, m_effect->snapshot->getTexture(), local, true, true, blurDrawFor(m_effect->blur, std::move(blurTex), m_effect->box, mon->m_scale));
         });
         return {};
     }

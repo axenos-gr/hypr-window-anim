@@ -104,6 +104,7 @@ if(HWA_BUILD_PLUGIN)
         plugin/src/ShaderCache.cpp
         plugin/src/ConfigWatcher.cpp
         plugin/src/OpenTransformer.cpp
+        plugin/src/WindowBlur.cpp
     )
     set_target_properties(hwa-plugin PROPERTIES PREFIX "" OUTPUT_NAME "hypr-window-anim")
     target_link_libraries(hwa-plugin PRIVATE hwa-common PkgConfig::hyprland)
