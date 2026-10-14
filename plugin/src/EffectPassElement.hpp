@@ -9,7 +9,7 @@ namespace hwa::plugin {
     inline constexpr const char* EFFECT_PASS_NAME = "CHwaEffectPassElement";
 
     // box: monitor-local px; flipEndFrame for snapshot textures
-    void drawEffectQuad(SEffect& e, SP<Render::ITexture> tex, const CBox& box, bool flipEndFrame, bool applyRenderModif);
+    void drawEffectQuad(SEffect& e, SP<Render::ITexture> tex, const CBox& box, bool flipEndFrame, bool applyRenderModif, const SBlurDraw& blur);
 
     class CEffectPassElement : public IPassElement {
       public:

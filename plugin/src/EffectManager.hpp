@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ShaderCache.hpp"
+#include "WindowBlur.hpp"
 
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/desktop/state/Fadeout.hpp>
@@ -28,6 +29,7 @@ namespace hwa::plugin {
         CBox                     box; // global logical, padded
         double                   paddingLogical = 0.0;
         bool                     fullscreen     = false;
+        SWindowBlur              blur;          // closing: as it was; opening: refreshed per frame
         float                    seed           = 0.F;
         Time::steady_tp          start;
         float                    durationS = 0.6F;
@@ -45,6 +47,7 @@ namespace hwa::plugin {
         float                    progress() const;
         float                    elapsed() const;
         std::optional<CBox>      liveBox() const; // opening only, global logical
+        Vector2D                 liveOffset() const; // workspace slide + floating offset
     };
 
     struct SEffectRequest {
