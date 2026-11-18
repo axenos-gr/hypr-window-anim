@@ -2,9 +2,9 @@
 #include "EffectPassElement.hpp"
 #include "Plugin.hpp"
 
-#include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/ClearPassElement.hpp>
@@ -15,92 +15,97 @@
 namespace hwa::plugin {
     COpenTransformer::COpenTransformer(SP<SEffect> effect) : m_effect(std::move(effect)) {}
 
-    COpenTransformer::~COpenTransformer() {
-        makeGLCurrent();
-        m_outs.clear();
+    bool COpenTransformer::active() const {
+        return m_active;
     }
 
-    SP<Render::IFramebuffer> COpenTransformer::outFor(const SP<Render::IFramebuffer>& in) {
-        for (auto& [key, fb] : m_outs) {
-            if (key == in.get())
-                return fb;
-        }
-
-        if (m_outs.size() >= 3) // work buffers rotate; don't grow forever
-            m_outs.erase(m_outs.begin());
-
-        auto fb = g_pHyprRenderer->createFB("hwanim open");
-        m_outs.emplace_back(in.get(), fb);
-        return fb;
+    void COpenTransformer::deactivate() {
+        m_active = false;
     }
 
-    SP<Render::IFramebuffer> COpenTransformer::transform(SP<Render::IFramebuffer> in) {
-        SP<Render::IFramebuffer> result = in;
+    CBox COpenTransformer::transformedExtents(const CBox& currentBox) const {
+        return m_active ? currentBox.copy().expand(m_effect->padding) : currentBox;
+    }
+
+    // Modeled on CWobbleTransformer::transform
+    Render::SWindowTransformBuffer COpenTransformer::transform(Render::CRenderContext& ctx, const Render::SWindowTransformBuffer& in,
+                                                               const Render::SWindowTransformContext& context) {
+        Render::SWindowTransformBuffer result = in;
 
         guarded("open transform", [&] {
-            const auto mon = g_pHyprRenderer->m_renderData.pMonitor.lock();
+            const auto mon = context.monitor.lock();
             const auto w   = m_effect->window.lock();
             // a snapshot of an opening window should show the window, not the effect
-            if (g_unloading || !mon || !w || !in || !in->getTexture() || g_pHyprRenderer->m_bRenderingSnapshot)
+            if (g_unloading || !m_active || !mon || !w || context.standalone || context.renderingSnapshot || ctx.m_renderingSnapshot || !in.framebuffer ||
+                !in.framebuffer->getTexture() || in.box.empty())
                 return;
 
-            const auto box = m_effect->liveBox();
-            if (!box)
+            const double SCALE     = mon->m_scale;
+            const CBox   OUTCANVAS = Render::pixelBoxForLogical(context.outputBox.copy().expand(1.0 / SCALE), SCALE);
+            if (OUTCANVAS.empty())
                 return;
 
-            auto out = outFor(in);
-            if (!out->alloc(in->m_size.x, in->m_size.y, in->m_drmFormat))
+            auto out = g_pHyprRenderer->getWorkBuffer(ctx, OUTCANVAS.size());
+            if (!out) {
+                result.success = false;
                 return;
-            out->setImageDescription(in->imageDescription());
+            }
 
-            const CBox full         = w->getFullWindowBoundingBox();
+            const CBox full          = w->getFullWindowBoundingBox();
             m_effect->paddingLogical = m_effect->padding + std::max(0.0, w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x - full.x);
             m_effect->fullscreen     = false;
 
-            const CBox local = box->copy().translate(-mon->m_position).scale(mon->m_scale);
+            const CBox effectLocal = context.currentBox.copy().expand(m_effect->padding).scale(SCALE);
+            const CBox effectBox   = effectLocal.copy().translate(-OUTCANVAS.pos());
+            const CBox inBox       = in.box.copy().translate(-OUTCANVAS.pos());
+            const CBox monitorBox  = CBox{{}, mon->m_transformedSize}.translate(-OUTCANVAS.pos());
 
             // our own blur underneath; Hyprland's is off for the effect (see startOpen)
             m_effect->blur = windowBlurFor(w, m_effect->ownsNoBlur);
             m_effect->blur.surface.translate(m_effect->liveOffset());
-            auto blurTex = blurTextureFor(m_effect->blur, mon, m_behind.lock());
+            auto behind = m_behind.lock();
+            if (!behind)
+                behind = ctx.m_data.mainFB;
+            auto       blurSrc  = blurSourceFor(ctx, m_effect->blur, mon, behind);
+            const auto blurDraw = blurDrawFor(m_effect->blur, std::move(blurSrc), monitorBox, CBox{effectLocal}.scale(1.0 / SCALE).translate(mon->m_position), SCALE);
 
-            // all of `out` reaches the screen; the nested pass shrank damage to the window box
-            auto&         rd    = g_pHyprRenderer->m_renderData;
-            const CRegion saved = rd.damage;
-            rd.damage           = CRegion{0, 0, mon->m_transformedSize.x, mon->m_transformedSize.y};
+            Render::GL::CFramebufferBindingGuard bindings{g_pHyprRenderer->glBackend()};
+            auto                                 state = ctx.saveDrawState();
+            auto&                                rd    = ctx.m_data;
+            g_pHyprRenderer->bindFB(ctx, out);
+            rd.damage          = CRegion{CBox{{}, OUTCANVAS.size()}};
+            rd.fbSize          = OUTCANVAS.size();
+            rd.transformDamage = false;
+            rd.renderModif     = {};
+            g_pHyprRenderer->setProjectionType(ctx, Render::RPT_EXPORT);
 
-            {
-                auto guard = g_pHyprRenderer->bindTempFB(out);
-                g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
-                // the work buffer already holds the window where it is drawn; no render modifs
-                drawEffectQuad(*m_effect, in->getTexture(), local, false, false, blurDrawFor(m_effect->blur, std::move(blurTex), *box, mon->m_scale));
-            }
-            rd.damage = saved;
+            g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
+            drawEffectQuad(ctx, *m_effect, in.framebuffer->getTexture(), effectBox, inBox, false, blurDraw);
 
-            result = out;
+            result = {.framebuffer = out, .box = OUTCANVAS};
         });
 
         return result;
     }
 
-    void COpenTransformer::preWindowRender(CSurfacePassElement::SRenderData* pRenderData) {
-        m_behind = g_pHyprRenderer->m_renderData.currentFB;
+    void COpenTransformer::preWindowRender(Render::CRenderContext& ctx, CSurfacePassElement::SRenderData* pRenderData) {
+        m_behind = ctx.m_data.currentFB;
     }
 
     namespace {
         const char* openBlocker(PHLWINDOW w) {
             if (!Desktop::View::validMapped(w) || w->isHidden())
                 return "not mapped or hidden";
-            if (w->isX11OverrideRedirect())
+            if (w->backend().traits().overrideRedirect)
                 return "override-redirect";
 
             const auto ws = w->m_workspace;
-            if (!ws || !ws->isVisible())
+            if (!ws || !ws->visible())
                 return "workspace not visible";
             if (w->m_ruleApplicator->noAnim().valueOrDefault())
                 return "no_anim rule";
             // covered by a fullscreen window
-            if (w->alphaGoal(Desktop::View::WINDOW_ALPHA_FULLSCREEN) < 0.99F)
+            if (w->presentation().alphaGoal(Desktop::View::WINDOW_ALPHA_FULLSCREEN) < 0.99F)
                 return "behind fullscreen";
             if (!w->m_monitor.lock() || !g_pHyprRenderer->shouldRenderWindow(w))
                 return "not rendered";
@@ -112,12 +117,12 @@ namespace hwa::plugin {
         if (g_unloading || !w)
             return;
 
-        const auto d = decide(state().config, {.cls = w->m_class, .title = w->m_title, .floating = w->m_isFloating, .xwayland = w->m_isX11}, eAnim::OPEN);
+        const auto d = decide(state().config, factsFor(w), eAnim::OPEN);
         if (!mayAnimate(d.effects))
             return;
 
         if (const auto why = openBlocker(w)) {
-            log(std::format("not animating open of {}: {}", w->m_class, why));
+            log(std::format("not animating open of {}: {}", w->metadata().appID(), why));
             return;
         }
 
@@ -128,6 +133,6 @@ namespace hwa::plugin {
         // one animation at a time: finish popin/fade-in instantly
         w->positionAnimation()->warp();
         w->sizeAnimation()->warp();
-        w->alpha(Desktop::View::WINDOW_ALPHA_FADE)->warp();
+        w->presentation().alpha(Desktop::View::WINDOW_ALPHA_FADE)->warp();
     }
 }

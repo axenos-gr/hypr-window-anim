@@ -19,7 +19,8 @@ uniform float     uTime;
 uniform float     uMonitorScale;
 
 // Window blur, drawn behind it like Hyprland does: effect ends match the screen
-uniform sampler2D hwaBlurTex;   // blurred background, same space as uTexture
+uniform sampler2D hwaBlurTex;   // blurred background
+uniform vec4      hwaBlurUV;    // effect box inside hwaBlurTex, like uEffectRect
 uniform int       hwaBlur;
 uniform vec4      hwaBlurRect;  // window surface in the effect box, px
 uniform vec2      hwaBlurRound; // radius px, rounding power
@@ -58,7 +59,7 @@ vec4 getInputColor(vec2 coords) {
 
   if (hwaBlur == 1) {
     float m = hwaBlurMask(coords * uSize) * hwaBlurAlpha;
-    color += texture(hwaBlurTex, uv) * m * (1.0 - color.a); // premultiplied: window over blur
+    color += texture(hwaBlurTex, hwaBlurUV.xy + coords * hwaBlurUV.zw) * m * (1.0 - color.a); // premultiplied: window over blur
   }
 
   if (color.a > 0.0) {

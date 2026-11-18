@@ -87,6 +87,7 @@ if(HWA_BUILD_PLUGIN)
         wayland-server
         xkbcommon
     )
+    pkg_check_modules(lua REQUIRED IMPORTED_TARGET lua5.5) # Hyprland's config runtime; plugin Lua functions
     pkg_get_variable(HYPRLAND_PREFIX hyprland prefix)
 
     include(cmake/AbiString.cmake)
@@ -107,7 +108,7 @@ if(HWA_BUILD_PLUGIN)
         plugin/src/WindowBlur.cpp
     )
     set_target_properties(hwa-plugin PROPERTIES PREFIX "" OUTPUT_NAME "hypr-window-anim")
-    target_link_libraries(hwa-plugin PRIVATE hwa-common PkgConfig::hyprland)
+    target_link_libraries(hwa-plugin PRIVATE hwa-common PkgConfig::hyprland PkgConfig::lua)
     target_compile_definitions(hwa-plugin PRIVATE HWA_BUILD_ABI="${HWA_ABI}")
     # No -fvisibility=hidden: Hyprland's inline globals must bind to the compositor's copies
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

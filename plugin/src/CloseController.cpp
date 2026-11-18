@@ -5,17 +5,19 @@
 
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/config/shared/animation/AnimationTree.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/history/WindowHistoryTracker.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/ViewState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowGroupMembership.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/layout/target/Target.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 
 #include <algorithm>
 #include <format>
@@ -30,29 +32,29 @@ namespace hwa::plugin {
     }
 
     Desktop::eFadeoutPlane planeFor(PHLWINDOW w) {
-        if (!w->m_isFloating)
+        if (!w->isFloating())
             return Desktop::FADEOUT_PLANE_WINDOW_TILED;
         if (w->shouldRenderOverFullscreen() && w->m_workspace && Fullscreen::controller()->hasFullscreen(w->m_workspace, true))
             return Desktop::FADEOUT_PLANE_WINDOW_OVER_FULLSCREEN;
         return Desktop::FADEOUT_PLANE_WINDOW_FLOATING;
     }
 
-    namespace {
-        SWindowFacts factsFor(PHLWINDOW w) {
-            return {.cls = w->m_class, .title = w->m_title, .floating = w->m_isFloating, .xwayland = w->m_isX11};
-        }
+    SWindowFacts factsFor(PHLWINDOW w) {
+        return {.cls = w->metadata().appID(), .title = w->metadata().title(), .floating = w->isFloating(), .xwayland = w->backend().isX11()};
+    }
 
+    namespace {
         // Reason to skip holding, nullptr if eligible
         const char* holdBlocker(PHLWINDOW w) {
             if (!Desktop::View::validMapped(w) || w->isHidden())
                 return "not mapped or hidden";
-            if (w->m_group || w->m_pinned)
+            if (w->grouping().group() || (w->m_state & Desktop::View::WINDOW_STATE_PINNED))
                 return "grouped or pinned";
-            if (w->isX11OverrideRedirect())
+            if (w->backend().traits().overrideRedirect)
                 return "override-redirect";
 
             const auto ws = w->m_workspace;
-            if (!ws || !ws->isVisible())
+            if (!ws || !ws->visible())
                 return "workspace not visible";
             if (ws->m_renderOffset->isBeingAnimated() || ws->m_alpha->isBeingAnimated())
                 return "workspace animating";
@@ -60,7 +62,7 @@ namespace hwa::plugin {
                 return "fullscreen";
 
             // Close gesture lowers the goal; fade-in does not
-            if (w->alphaGoal(WINDOW_ALPHA_FADE) < 0.99F)
+            if (w->presentation().alphaGoal(WINDOW_ALPHA_FADE) < 0.99F)
                 return "close gesture in progress";
             if (w->m_ruleApplicator->noAnim().valueOrDefault())
                 return "no_anim rule";
@@ -95,7 +97,8 @@ namespace hwa::plugin {
         std::string out;
         for (const auto& p : m_pending) {
             const auto w = p->window.lock();
-            out += std::format("  holding {} [{}]{}{}\n", w ? w->m_class : "<gone>", w ? w->m_title : "", p->closeSent ? " close sent" : "", p->preview ? " preview" : "");
+            out += std::format("  holding {} [{}]{}{}\n", w ? w->metadata().appID() : "<gone>", w ? w->metadata().title() : "", p->closeSent ? " close sent" : "",
+                               p->preview ? " preview" : "");
         }
         return out;
     }
@@ -129,7 +132,7 @@ namespace hwa::plugin {
         if (!mayAnimate(d.effects) || !d.hold)
             return false;
         if (const auto why = holdBlocker(w)) {
-            log(std::format("not holding {}: {}", w->m_class, why));
+            log(std::format("not holding {}: {}", w->metadata().appID(), why));
             return false;
         }
 
@@ -168,7 +171,7 @@ namespace hwa::plugin {
                 onEffectEnd(p);
         });
 
-        log(std::format("holding {} for '{}'{}", w->m_class, name, preview ? " (preview)" : ""));
+        log(std::format("holding {} for '{}'{}", w->metadata().appID(), name, preview ? " (preview)" : ""));
         return true;
     }
 
@@ -176,7 +179,7 @@ namespace hwa::plugin {
         cancelTimer(p->timer);
 
         const auto w = p->window.lock();
-        if (!w || !w->m_isMapped) {
+        if (!w || !w->mapped()) {
             erase(p);
             return;
         }
@@ -203,15 +206,15 @@ namespace hwa::plugin {
         erase(p);
 
         const auto w = p->window.lock();
-        if (!w || !w->m_isMapped)
+        if (!w || !w->mapped())
             return;
 
         w->setHidden(false);
         w->layoutTarget()->recalc();
-        w->updateDecorationValues();
+        w->presentation().refreshValues();
         w->sendWindowSize(true);
 
-        auto& alpha = w->alpha(WINDOW_ALPHA_FADE);
+        auto& alpha = w->presentation().alpha(WINDOW_ALPHA_FADE);
         alpha->setConfig(Config::animationTree()->getAnimationPropertyConfig("fadeIn"));
         alpha->setValueAndWarp(0.F);
         *alpha = 1.F;
@@ -231,17 +234,17 @@ namespace hwa::plugin {
         CConfigValue<Config::INTEGER> focusOnClose("input:focus_on_close");
         if (focusOnClose.good() && *focusOnClose == 1) {
             const auto c = Desktop::viewState()->hitTest().windowAt(g_pInputManager->getMouseCoordsInternal(),
-                                                                    Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING);
+                                                                    Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING, held);
             if (usable(c))
                 return c;
         }
 
-        if (!held->m_isFloating) {
+        if (!held->isFloating()) {
             PHLWINDOW  best;
             double     bestDist = 0;
             const auto center   = held->middle();
             for (const auto& c : Desktop::windowState()->windows()) {
-                if (!usable(c) || c->m_isFloating)
+                if (!usable(c) || c->isFloating())
                     continue;
                 const auto dist = c->middle().distance(center);
                 if (!best || dist < bestDist) {
@@ -267,7 +270,7 @@ namespace hwa::plugin {
 
         const auto c = pickCandidate(held);
         if (c)
-            Desktop::focusState()->fullWindowFocus(c, held->m_isFloating ? Desktop::FOCUS_REASON_UNMAP_WINDOW_FLOATING : Desktop::FOCUS_REASON_UNMAP_WINDOW_TILING);
+            Desktop::focusState()->fullWindowFocus(c, held->isFloating() ? Desktop::FOCUS_REASON_UNMAP_WINDOW_FLOATING : Desktop::FOCUS_REASON_UNMAP_WINDOW_TILING);
         else
             Desktop::focusState()->fullWindowFocus(nullptr, Desktop::FOCUS_REASON_OTHER);
 
@@ -295,7 +298,7 @@ namespace hwa::plugin {
             return false; // "none" was picked when the close was requested
 
         const auto& cfg = state().config;
-        if (!cfg.general.enabled || !cfg.general.appCloseEffects || !snapshot || w->isX11OverrideRedirect())
+        if (!cfg.general.enabled || !cfg.general.appCloseEffects || !snapshot || w->backend().traits().overrideRedirect)
             return false;
 
         const auto d = decide(cfg, factsFor(w), eAnim::CLOSE);
@@ -315,8 +318,8 @@ namespace hwa::plugin {
             if (!p->closeSent || !held || held == w)
                 continue;
 
-            const bool child  = w->parent() == held;
-            const bool sibling = w->m_isFloating && held->getPID() > 0 && w->getPID() == held->getPID();
+            const bool child   = w->backend().parent() == held;
+            const bool sibling = w->isFloating() && held->backend().pid() > 0 && w->backend().pid() == held->backend().pid();
             if (!child && !sibling)
                 continue;
 
@@ -333,7 +336,7 @@ namespace hwa::plugin {
     void CCloseController::onRenderPre() {
         // Hyprland un-hides on layout switch, resize, X11 configure
         for (const auto& p : m_pending) {
-            if (const auto w = p->window.lock(); w && w->m_isMapped && !w->isHidden())
+            if (const auto w = p->window.lock(); w && w->mapped() && !w->isHidden())
                 w->setHidden(true);
         }
     }
@@ -346,7 +349,7 @@ namespace hwa::plugin {
 
             const bool sendClose = !p->preview && !p->closeSent;
             revert(p, false);
-            if (sendClose && w && w->m_isMapped)
+            if (sendClose && w && w->mapped())
                 hooks::sendCloseOriginal(w);
         }
     }
@@ -356,7 +359,7 @@ namespace hwa::plugin {
             erase(p);
 
             const auto w = p->window.lock();
-            if (!w || !w->m_isMapped)
+            if (!w || !w->mapped())
                 continue;
 
             w->setHidden(false);

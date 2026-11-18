@@ -8,11 +8,11 @@
 - `hypr-window-anim` — CLI: загрузка с проверкой ABI, перезагрузка конфига, превью, проверка шейдеров.
 - `hwa-sheet` (необязательно, `-DHWA_BUILD_TOOLS=ON`) — офлайн-рендерер эффектов для их разработки.
 
-Проверено на Hyprland 0.56.2 (рендерер OpenGL).
+Проверено на Hyprland 0.57.2 (рендерер OpenGL, Lua-конфиг). Для 0.56 соберите коммит `8280be7`.
 
 ## Как это работает
 
-**Закрытие через WM** (`killactive`, `closewindow`, панели задач, жест тачпада, средний клик по group-bar). Все такие запросы проходят через `CHyprXWaylandManager::sendCloseWindow`, плагин перехватывает этот вызов:
+**Закрытие через WM** (`hl.dsp.window.close()`, панели задач, жест тачпада, средний клик по group-bar). Все такие запросы проходят через `CWindow::sendClose`, плагин перехватывает этот вызов:
 1. Снимает снимок окна (с рамкой, тенью и скруглением).
 2. Прячет окно через `setHidden`: место в раскладке остаётся за ним, ввод в окно больше не идёт.
 3. Сразу передаёт фокус соседнему окну, поэтому несколько Super+C подряд закрывают окна по очереди.
@@ -51,7 +51,8 @@
 
 ### Что нужно
 
-- Hyprland 0.56 с рендерером OpenGL и заголовками той же версии, что запущена. На Arch заголовки ставятся вместе с пакетом `hyprland`.
+- Hyprland 0.57 с рендерером OpenGL и заголовками той же версии, что запущена. На Arch заголовки ставятся вместе с пакетом `hyprland`.
+- Заголовки Lua 5.5 (`lua`; уже стоит как зависимость Hyprland).
 - `cmake`, `ninja` (или `make`), `pkgconf`, компилятор C++23 (GCC 14+), `tomlplusplus`.
 - Необязательно: `glslang` для офлайн-проверки шейдеров.
 
@@ -87,15 +88,17 @@ hypr-window-anim status                 # hooks: ok — всё работает
 hypr-window-anim preview incinerate     # посмотреть эффект: окно сгорит и вернётся
 ```
 
-Чтобы плагин загружался при каждом входе, добавьте в `hyprland.conf`:
+Чтобы плагин загружался при каждом входе, добавьте в `hyprland.lua`:
 
-```
-exec-once = ~/.local/bin/hypr-window-anim load
+```lua
+hl.on("hyprland.start", function()
+    hl.exec_cmd("~/.local/bin/hypr-window-anim load")
+end)
 ```
 
 Полный путь нужен потому, что при старте Hyprland `~/.local/bin` может ещё не быть в `PATH`.
 
-`load` сначала сравнивает ABI, под который собран плагин (файл `hypr-window-anim.so.abi` рядом с `.so`), с `abiHash` запущенного Hyprland. При несовпадении плагин не загружается. Сам плагин проверяет хеш ещё раз в `pluginInit`. Бинды менять не нужно: штатный `killactive` уже анимируется.
+`load` сначала сравнивает ABI, под который собран плагин (файл `hypr-window-anim.so.abi` рядом с `.so`), с `abiHash` запущенного Hyprland. При несовпадении плагин не загружается. Сам плагин проверяет хеш ещё раз в `pluginInit`. Бинды менять не нужно: штатный `hl.dsp.window.close()` уже анимируется.
 
 Конфиг необязателен, без него работают значения по умолчанию. Создать его для правки:
 
@@ -103,7 +106,7 @@ exec-once = ~/.local/bin/hypr-window-anim load
 hypr-window-anim init        # ~/.config/hypr-window-anim/config.toml, применяется на лету
 ```
 
-Выключить: `hypr-window-anim unload` и убрать строку `exec-once`.
+Выключить: `hypr-window-anim unload` и убрать его из автозапуска.
 
 ### Через hyprpm (экспериментально)
 
@@ -115,7 +118,7 @@ hyprpm add https://github.com/axenos-gr/hypr-window-anim
 hyprpm enable hypr-window-anim
 ```
 
-В `hyprland.conf` добавьте `exec-once = hyprpm reload -n`. hyprpm собирает только плагин, без CLI. Вместо CLI используйте `hyprctl hwanim status|reload|list|check|preview`.
+В автозапуск `hyprland.lua` добавьте `hl.exec_cmd("hyprpm reload -n")`. hyprpm собирает только плагин, без CLI. Вместо CLI используйте `hyprctl hwanim status|reload|list|check|preview`.
 
 ### Обновление
 
@@ -244,16 +247,26 @@ build/hwa-sheet myeffect --verify           # первый кадр совпад
 | `check [--offline] [--all] [effect…]` | проверить конфиг и шейдеры |
 | `doctor`, `instances`, `version` | диагностика |
 
-`--instance SIG` направляет команду в конкретный экземпляр Hyprland. Dispatcher'ы для биндов: `hwanim:close [effect]` и `hwanim:preview [effect]`.
+`--instance SIG` направляет команду в конкретный экземпляр Hyprland.
+
+Dispatcher'ы плагинов в 0.57 убраны, вместо `hwanim:close`/`hwanim:preview` плагин регистрирует Lua-функции `hl.plugin.hwanim.close([effect])` и `hl.plugin.hwanim.preview([effect])`. При выгрузке плагина они исчезают, поэтому в биндах их стоит оборачивать проверкой:
+
+```lua
+hl.bind("SUPER + X", function()
+    if hl.plugin.hwanim then hl.plugin.hwanim.close("shatter") end
+end)
+```
+
+Из терминала: `hyprctl eval 'hl.plugin.hwanim.close("shatter")'`.
 
 ## Безопасное тестирование
 
 Ошибка в плагине роняет весь композитор. Новые сборки проверяйте во вложенном Hyprland:
 
 ```sh
-N=$(tools/nested-session.sh)         # окно на workspace 10, конфиг tools/nested.conf
+N=$(tools/nested-session.sh)         # окно на workspace 10, конфиг tools/nested.lua
 build/hypr-window-anim -i "$N" load --plugin build/hypr-window-anim.so
-hyprctl -i "$N" dispatch exec foot   # во вложенной сессии бинды на SUPER
+hyprctl -i "$N" dispatch 'hl.dsp.exec_cmd("foot")'   # во вложенной сессии бинды на SUPER
 ```
 
 `tools/testapps/close-behaviour.py dialog|ignore|slow` — тестовое окно, которое по-разному реагирует на запрос закрытия.
@@ -264,7 +277,8 @@ hyprctl -i "$N" dispatch exec foot   # во вложенной сессии би
 - Не удерживаются (эффект при этом играет): fullscreen, окна в группах, закреплённые (pinned) окна, окна на рабочем столе в момент анимации переключения, закрытия жестом тачпада, окна с правилом `no_anim`.
 - Если приложение закрывается медленно, после эффекта на его месте на мгновение остаётся пустое место. Если приложение закрывается дольше `close_timeout_ms`, окно успеет вернуться, и эффект сыграет второй раз.
 - Открытие не анимируется для override-redirect окон X11 (меню, подсказки), окон на невидимом рабочем столе, окон за fullscreen-окном и окон с правилом `no_anim`. Им остаётся штатная анимация Hyprland.
-- На повёрнутых мониторах эффект повёрнут вместе с буфером, а blur полупрозрачных окон во время эффекта не рисуется. HDR не учитывается.
+- HDR не учитывается.
+- Эффекты не попадают в захват отдельного рабочего стола (screenshare workspace из 0.57), только в захват монитора.
 - Если приложение снимает окно с экрана пустым буфером, снимок пуст, и эффекта не видно (так же, как у штатного fade-out).
 
 ## Лицензия

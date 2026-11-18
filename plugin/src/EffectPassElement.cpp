@@ -7,23 +7,26 @@
 #include <hyprland/src/render/Renderer.hpp>
 
 namespace hwa::plugin {
+    namespace {
+        // Maps effect coords (0..1 over box) into a texture covering texBox
+        std::array<float, 4> uvRect(const CBox& box, const CBox& texBox) {
+            return {float((box.x - texBox.x) / texBox.w), float((box.y - texBox.y) / texBox.h), float(box.w / texBox.w), float(box.h / texBox.h)};
+        }
+    }
+
     // Mirrors CHyprOpenGLImpl::renderTextureInternal
-    void drawEffectQuad(SEffect& e, SP<Render::ITexture> tex, const CBox& box, bool flipEndFrame, bool applyRenderModif, const SBlurDraw& blur) {
-        auto&       rd  = g_pHyprRenderer->m_renderData;
+    void drawEffectQuad(Render::CRenderContext& ctx, SEffect& e, SP<Render::ITexture> tex, const CBox& box, const CBox& texBox, bool applyRenderModif, const SBlurDraw& blur) {
+        auto&       rd  = ctx.m_data;
         const auto  mon = rd.pMonitor.lock();
         const auto& gl  = Render::GL::g_pHyprOpenGL;
 
         if (!e.program || !e.program->shader || !tex || !tex->ok() || !mon || !gl)
             return;
 
-        const auto PX = mon->m_pixelSize;
-        if (PX.x <= 0 || PX.y <= 0 || box.w <= 0 || box.h <= 0)
+        if (box.w <= 0 || box.h <= 0 || texBox.w <= 0 || texBox.h <= 0)
             return;
 
-        const auto INVERTED = Math::wlTransformToHyprutils(Math::invertTransform(mon->m_transform));
-        const CBox texBox   = flipEndFrame ? box.copy().transform(INVERTED, mon->m_transformedSize.x, mon->m_transformedSize.y) : box;
-
-        CBox       drawBox = box;
+        CBox drawBox = box;
         if (applyRenderModif)
             rd.renderModif.applyToBox(drawBox);
 
@@ -38,15 +41,13 @@ namespace hwa::plugin {
             e.lastFrame = NOW;
         }
 
-        g_pHyprRenderer->pushMonitorTransformEnabled(flipEndFrame);
-
-        const auto TRANSFORM = flipEndFrame ? Math::composeTransform(INVERTED, tex->m_transform) : tex->m_transform;
-        const auto MATRIX    = g_pHyprRenderer->projectBoxToTarget(drawBox, TRANSFORM);
+        const auto MATRIX = g_pHyprRenderer->projectBoxToTarget(ctx, drawBox, Math::invertTransform(tex->m_transform));
 
         auto       shader = gl->useShader(e.program->shader).lock();
         shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, MATRIX.getMatrix());
 
-        glActiveTexture(GL_TEXTURE0);
+        // Hyprland shadows the active unit; keep its cache in sync
+        gl->setActiveTexture(GL_TEXTURE0);
         tex->bind();
         tex->setTexParameter(GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         tex->setTexParameter(GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -59,6 +60,7 @@ namespace hwa::plugin {
                 apply(loc);
         };
 
+        const auto EFFECT_UV = uvRect(box, texBox);
         set("uTexture", [](GLint l) { glUniform1i(l, 0); });
         set("uProgress", [&](GLint l) { glUniform1f(l, e.progress()); });
         set("uDuration", [&](GLint l) { glUniform1f(l, e.durationS); });
@@ -67,16 +69,19 @@ namespace hwa::plugin {
         set("uPadding", [&](GLint l) { glUniform1f(l, e.paddingLogical * mon->m_scale); });
         set("uMonitorScale", [&](GLint l) { glUniform1f(l, mon->m_scale); });
         set("uSize", [&](GLint l) { glUniform2f(l, box.w, box.h); });
-        set("uEffectRect", [&](GLint l) { glUniform4f(l, texBox.x / PX.x, texBox.y / PX.y, texBox.w / PX.x, texBox.h / PX.y); });
+        set("uEffectRect", [&](GLint l) { glUniform4f(l, EFFECT_UV[0], EFFECT_UV[1], EFFECT_UV[2], EFFECT_UV[3]); });
         set("uForOpening", [&](GLint l) { glUniform1i(l, e.forOpening ? 1 : 0); });
         set("uIsFullscreen", [&](GLint l) { glUniform1i(l, e.fullscreen ? 1 : 0); });
 
-        set("hwaBlur", [&](GLint l) { glUniform1i(l, blur.tex ? 1 : 0); });
-        if (blur.tex) {
-            glActiveTexture(GL_TEXTURE1);
-            blur.tex->bind();
-            glActiveTexture(GL_TEXTURE0);
+        const auto& blurTex = blur.src.tex;
+        set("hwaBlur", [&](GLint l) { glUniform1i(l, blurTex ? 1 : 0); });
+        if (blurTex) {
+            gl->setActiveTexture(GL_TEXTURE1);
+            blurTex->bind();
+            gl->setActiveTexture(GL_TEXTURE0);
+            const auto BLUR_UV = uvRect(box, blur.texBox);
             set("hwaBlurTex", [](GLint l) { glUniform1i(l, 1); });
+            set("hwaBlurUV", [&](GLint l) { glUniform4f(l, BLUR_UV[0], BLUR_UV[1], BLUR_UV[2], BLUR_UV[3]); });
             set("hwaBlurRect", [&](GLint l) { glUniform4f(l, blur.rect.x, blur.rect.y, blur.rect.w, blur.rect.h); });
             set("hwaBlurRound", [&](GLint l) { glUniform2f(l, blur.radius, blur.power); });
             set("hwaBlurAlpha", [&](GLint l) { glUniform1f(l, blur.alpha); });
@@ -89,43 +94,48 @@ namespace hwa::plugin {
         glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
 
         damage.forEachRect([&](const auto& RECT) {
-            gl->scissor(&RECT, rd.transformDamage);
+            gl->scissor(ctx, &RECT, rd.transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
 
-        gl->scissor(nullptr);
+        gl->disableScissor();
         glBindVertexArray(0);
         tex->unbind();
-        if (blur.tex) {
-            glActiveTexture(GL_TEXTURE1);
-            blur.tex->unbind();
-            glActiveTexture(GL_TEXTURE0);
+        if (blurTex) {
+            gl->setActiveTexture(GL_TEXTURE1);
+            blurTex->unbind();
+            gl->setActiveTexture(GL_TEXTURE0);
         }
-
-        g_pHyprRenderer->popMonitorTransformEnabled();
     }
 
     CEffectPassElement::CEffectPassElement(SP<SEffect> effect) : m_effect(std::move(effect)) {}
 
-    std::vector<UP<IPassElement>> CEffectPassElement::draw() {
-        guarded("draw", [this] {
-            const auto mon = g_pHyprRenderer->m_renderData.pMonitor.lock();
-            if (!m_effect || !m_effect->snapshot || !mon || g_pHyprRenderer->m_bRenderingSnapshot)
+    std::vector<UP<IPassElement>> CEffectPassElement::draw(Render::CRenderContext& ctx) {
+        guarded("draw", [&] {
+            const auto mon = ctx.m_data.pMonitor.lock();
+            if (!m_effect || !m_effect->snapshot || !mon || ctx.m_renderingSnapshot)
                 return;
 
+            const auto tex = m_effect->snapshot->getTexture();
+            if (!tex)
+                return;
+
+            // snapshots and the frame share monitor-local px since 0.57
+            const CBox texBox = {{}, tex->m_size};
+            const CBox local  = m_effect->box.copy().translate(-mon->m_position).scale(mon->m_scale);
+
             // the snapshot has no blur (Hyprland skips it for snapshots): add it back
-            auto       blurTex = blurTextureFor(m_effect->blur, mon, g_pHyprRenderer->m_renderData.currentFB);
-            const CBox local   = m_effect->box.copy().translate(-mon->m_position).scale(mon->m_scale);
-            drawEffectQuad(*m_effect, m_effect->snapshot->getTexture(), local, true, true, blurDrawFor(m_effect->blur, std::move(blurTex), m_effect->box, mon->m_scale));
+            auto blurSrc = blurSourceFor(ctx, m_effect->blur, mon, ctx.m_data.currentFB);
+            drawEffectQuad(ctx, *m_effect, tex, local, texBox, true, blurDrawFor(m_effect->blur, std::move(blurSrc), CBox{{}, mon->m_transformedSize}, m_effect->box, mon->m_scale));
         });
         return {};
     }
 
-    bool CEffectPassElement::needsLiveBlur() {
+    bool CEffectPassElement::needsLiveBlur(Render::CRenderContext& ctx) {
         return false;
     }
 
-    bool CEffectPassElement::needsPrecomputeBlur() {
+    bool CEffectPassElement::needsPrecomputeBlur(Render::CRenderContext& ctx) {
         return false;
     }
 
@@ -137,11 +147,11 @@ namespace hwa::plugin {
         return EK_CUSTOM;
     }
 
-    std::optional<CBox> CEffectPassElement::boundingBox() {
+    std::optional<CBox> CEffectPassElement::boundingBox(Render::CRenderContext& ctx) {
         return std::nullopt; // slides move us; draw() clips itself
     }
 
-    CRegion CEffectPassElement::opaqueRegion() {
+    CRegion CEffectPassElement::opaqueRegion(Render::CRenderContext& ctx) {
         return {};
     }
 }

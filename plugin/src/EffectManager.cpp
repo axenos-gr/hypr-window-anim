@@ -3,12 +3,15 @@
 #include "OpenTransformer.hpp"
 #include "Plugin.hpp"
 
-#include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowEffectsController.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/transformer/TransformerList.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 
 #include <algorithm>
 #include <format>
@@ -42,8 +45,8 @@ namespace hwa::plugin {
         const auto w = window.lock();
         if (!w)
             return {};
-        const auto ws = w->m_workspace;
-        return (w->m_pinned || !ws ? Vector2D{} : ws->m_renderOffset->value()) + w->m_floatingOffset;
+        const auto p = w->presentation().renderPresentation(); // what renderWindow adds
+        return p.workspaceOffset + p.floatingOffset;
     }
 
     std::expected<SP<SProgram>, std::string> CEffectManager::programFor(const std::string& name, SEffectSource& outSrc) {
@@ -160,9 +163,7 @@ namespace hwa::plugin {
             e->ownsNoBlur = true;
         }
 
-        auto transformer = makeUnique<COpenTransformer>(e);
-        e->transformer   = transformer.get();
-        w->m_transformers.emplace_back(std::move(transformer));
+        e->transformer = w->effects().transformers()->emplace<COpenTransformer>(e);
 
         const auto ID = e->id;
         e->endTimer   = addTimer(std::chrono::milliseconds{resolved.durationMs + 30}, [ID] { effects().finish(ID); });
@@ -225,7 +226,8 @@ namespace hwa::plugin {
         if (const auto w = e.window.lock()) {
             if (const auto live = e.liveBox())
                 g_pHyprRenderer->damageBox(*live);
-            std::erase_if(w->m_transformers, [&e](const auto& t) { return t.get() == e.transformer; });
+            e.transformer->deactivate();
+            w->effects().transformers()->removeInactive(); // destroys it while our code is loaded
 
             if (e.ownsNoBlur) {
                 auto& noBlur = w->m_ruleApplicator->noBlur();
@@ -289,7 +291,7 @@ namespace hwa::plugin {
         ensureTicking();
     }
 
-    void CEffectManager::addPassElements(PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace) {
+    void CEffectManager::addPassElements(Render::CRenderContext& ctx, PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace) {
         for (const auto& e : m_effects) {
             if (e->forOpening || e->monitor != monitor || e->plane != plane)
                 continue;
@@ -297,18 +299,18 @@ namespace hwa::plugin {
             if (const auto ws = e->workspace.lock(); ws && ws != workspace)
                 continue;
 
-            g_pHyprRenderer->m_renderPass.add(makeUnique<CEffectPassElement>(e));
+            Render::IHyprRenderer::addPassElement(ctx, makeUnique<CEffectPassElement>(e));
         }
     }
 
-    void CEffectManager::addPassElementsFallback(PHLMONITOR monitor) {
+    void CEffectManager::addPassElementsFallback(Render::CRenderContext& ctx, PHLMONITOR monitor) {
         for (const auto& e : m_effects) {
             if (e->forOpening || e->monitor != monitor)
                 continue;
-            if (const auto ws = e->workspace.lock(); ws && !ws->isVisible())
+            if (const auto ws = e->workspace.lock(); ws && !ws->visible())
                 continue;
 
-            g_pHyprRenderer->addPassElement(makeUnique<CEffectPassElement>(e));
+            Render::IHyprRenderer::addPassElement(ctx, makeUnique<CEffectPassElement>(e));
         }
     }
 

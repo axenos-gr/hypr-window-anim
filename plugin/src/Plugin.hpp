@@ -48,5 +48,7 @@ namespace hwa::plugin {
         return false;
     }
 
-    bool reloadConfig(bool notifyOnError);
+    bool         reloadConfig(bool notifyOnError);
+
+    SWindowFacts factsFor(PHLWINDOW w);
 }

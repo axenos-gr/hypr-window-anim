@@ -14,10 +14,12 @@
 
 class CEventLoopTimer;
 namespace Render {
-    class IWindowTransformer;
+    class CRenderContext;
 }
 
 namespace hwa::plugin {
+    class COpenTransformer;
+
     struct SEffect {
         uint64_t                 id = 0;
         PHLMONITORREF            monitor;
@@ -38,7 +40,7 @@ namespace hwa::plugin {
         // opening: live content via a window transformer instead of a snapshot
         bool                         forOpening = false;
         PHLWINDOWREF                 window;
-        Render::IWindowTransformer*  transformer = nullptr;
+        COpenTransformer*            transformer = nullptr; // owned by the window's transformer list
         double                       padding     = 0.0;
         bool                         ownsNoBlur  = false;  // we set no_blur so Hyprland skips its live blur
         std::optional<bool>          savedNoBlur;          // the setprop value we replaced
@@ -68,8 +70,8 @@ namespace hwa::plugin {
         void                    cancelOpen(PHLWINDOW w);
         int                     durationMsFor(uint64_t id) const;
 
-        void                    addPassElements(PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace);
-        void                    addPassElementsFallback(PHLMONITOR monitor);
+        void                    addPassElements(Render::CRenderContext& ctx, PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace);
+        void                    addPassElementsFallback(Render::CRenderContext& ctx, PHLMONITOR monitor);
         void                    onMonitorRemoved(PHLMONITOR monitor);
         void                    clear();
 

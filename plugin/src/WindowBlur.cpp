@@ -3,10 +3,10 @@
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/output/Monitor.hpp>
-#include <hyprland/src/output/MonitorResources.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 
@@ -23,9 +23,10 @@ namespace hwa::plugin {
         if (!*enabled)
             return b;
 
-        // IHyprRenderer::shouldBlur (protected)
-        const auto& rules = w->m_ruleApplicator;
-        if ((!ignoreNoBlur && rules->noBlur().valueOrDefault()) || rules->RGBX().valueOrDefault() || w->opaque())
+        // CWindow::shouldBlur
+        const auto& rules        = w->m_ruleApplicator;
+        const auto& presentation = w->presentation();
+        if ((!ignoreNoBlur && rules->noBlur().valueOrDefault()) || rules->RGBX().valueOrDefault() || presentation.opaque())
             return b;
 
         const auto surface = w->wlSurface();
@@ -35,55 +36,55 @@ namespace hwa::plugin {
         // drawSurface only blurs see-through windows
         const auto  resource = surface ? surface->resource() : nullptr;
         const auto  tex      = resource ? resource->m_current.texture : nullptr;
-        const float alpha    = (rules->opaque().valueOrDefault() ? 1.F : w->alphaValue(Desktop::View::WINDOW_ALPHA_ACTIVE)) * (surface ? surface->m_alphaModifier : 1.F);
+        const float alpha    = (rules->opaque().valueOrDefault() ? 1.F : presentation.alphaValue(Desktop::View::WINDOW_ALPHA_ACTIVE)) * (surface ? surface->m_alphaModifier : 1.F);
         const float overall  = surface ? surface->m_overallOpacity : 1.F;
         if (tex && tex->m_opaque && alpha >= 1.F && overall >= 1.F)
             return b;
 
         // IHyprRenderer::shouldUseNewBlurOptimizations, minus its blur texture check
         const auto ruleXray = rules->xray();
-        if (ruleXray.hasValue() && !ruleXray.valueOrDefault())
+        if (g_pHyprRenderer->blurProviderRequiresLiveBlur() || (ruleXray.hasValue() && !ruleXray.valueOrDefault()))
             b.precomputed = false;
         else
-            b.precomputed = (*newOptimizations && !w->m_isFloating && !w->onSpecialWorkspace()) || *xray || ruleXray.valueOrDefault();
+            b.precomputed = (*newOptimizations && !w->isFloating() && !w->onSpecialWorkspace()) || *xray || ruleXray.valueOrDefault();
 
-        const bool dontRound = Fullscreen::controller()->getFullscreenModes(w).internal == Fullscreen::FSMODE_FULLSCREEN;
-        b.enabled            = true;
-        b.surface            = {w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT), w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)};
-        b.rounding           = dontRound ? 0.F : w->rounding();
-        b.roundingPower      = dontRound ? 2.F : w->roundingPower();
-        b.alpha              = (*ignoreOpacity ? 1.F : alpha) * overall;
-        b.strength           = alpha;
+        auto&      mutPresentation = w->presentation();
+        const bool dontRound       = Fullscreen::controller()->getFullscreenModes(w).internal == Fullscreen::FSMODE_FULLSCREEN;
+        b.enabled                  = true;
+        b.surface                  = {w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT), w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)};
+        b.rounding                 = dontRound ? 0.F : mutPresentation.rounding();
+        b.roundingPower            = dontRound ? 2.F : mutPresentation.roundingPower();
+        b.alpha                    = (*ignoreOpacity ? 1.F : alpha) * overall;
+        b.strength                 = alpha;
         return b;
     }
 
-    SP<Render::ITexture> blurTextureFor(const SWindowBlur& b, PHLMONITOR mon, SP<Render::IFramebuffer> behind) {
-        // uv mapping assumes an untransformed monitor
-        if (!b.enabled || !mon || mon->m_transform != WL_OUTPUT_TRANSFORM_NORMAL)
-            return nullptr;
+    SBlurSource blurSourceFor(Render::CRenderContext& ctx, const SWindowBlur& b, PHLMONITOR mon, SP<Render::IFramebuffer> behind) {
+        if (!b.enabled || !mon)
+            return {};
 
         if (b.precomputed) {
-            // a weak ref to a unique ptr: use it, never lock() it (hyprutils asserts)
-            if (const auto res = mon->resources(); res && res->m_blurFB) {
-                if (auto tex = res->m_blurFB->getTexture(); tex && tex->ok())
-                    return tex;
-            }
+            if (auto tex = g_pHyprRenderer->getBlurTexture(ctx); tex && tex->ok())
+                return {.tex = std::move(tex), .keepAlive = nullptr};
         }
 
         if (!behind || !behind->getTexture())
-            return nullptr;
+            return {};
 
         CRegion damage{CBox{b.surface}.translate(-mon->m_position).scale(mon->m_scale).expand(2).round()};
-        auto    guard = g_pHyprRenderer->bindTempFB(behind); // blurFramebuffer messes with FB bindings
-        return g_pHyprRenderer->blurFramebuffer(behind, b.strength, &damage);
+        auto    guard = g_pHyprRenderer->bindTempFB(ctx, ctx.m_data.currentFB); // blurFramebuffer messes with FB bindings
+        auto    out   = g_pHyprRenderer->blurFramebuffer(ctx, behind, b.strength, damage);
+        if (!out || !out->getTexture())
+            return {};
+        return {.tex = out->getTexture(), .keepAlive = out};
     }
 
-    SBlurDraw blurDrawFor(const SWindowBlur& b, SP<Render::ITexture> tex, const CBox& effectBox, double scale) {
-        if (!tex)
+    SBlurDraw blurDrawFor(const SWindowBlur& b, SBlurSource src, const CBox& texBox, const CBox& effectBox, double scale) {
+        if (!src.tex || texBox.empty())
             return {};
 
         // drawSurface takes one pixel off the radius
         const CBox rect = CBox{b.surface.pos() - effectBox.pos(), b.surface.size()}.scale(scale).round();
-        return {.tex = std::move(tex), .rect = rect, .radius = std::max(0.F, b.rounding * float(scale) - 1.F), .power = b.roundingPower, .alpha = b.alpha};
+        return {.src = std::move(src), .texBox = texBox, .rect = rect, .radius = std::max(0.F, b.rounding * float(scale) - 1.F), .power = b.roundingPower, .alpha = b.alpha};
     }
 }

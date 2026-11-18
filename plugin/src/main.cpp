@@ -11,13 +11,15 @@
 #include "hwa/Paths.hpp"
 
 #include <hyprland/src/desktop/state/FocusState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
+
+#include <lua.hpp>
 
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -33,7 +35,7 @@ namespace hwa::plugin {
     namespace {
         std::vector<SP<CEventLoopTimer>>  g_timers;
         std::vector<CHyprSignalListener>  g_listeners;
-        SP<SHyprCtlCommand>               g_command;
+        SP<IPC::Socket1::SCommand>        g_command;
 
         std::string jsonEscape(std::string_view s) {
             std::string out;
@@ -70,11 +72,11 @@ namespace hwa::plugin {
     }
 
     void log(const std::string& msg) {
-        Log::logger->log(Log::DEBUG, "[hwanim] {}", msg);
+        Log::logger->log(Log::DEBUG, "hwanim", msg);
     }
 
     void logError(const std::string& msg) {
-        Log::logger->log(Log::ERR, "[hwanim] {}", msg);
+        Log::logger->log(Log::ERR, "hwanim", msg);
     }
 
     void notify(const std::string& msg, bool error) {
@@ -159,7 +161,7 @@ namespace {
                            g.closeTimeoutMs, g.openEffects ? describePool(g.openEffect) : "off", effects().count(), effects().describe(), closer().count(), closer().describe(), effects().history());
     }
 
-    std::string handleCommand(eHyprCtlOutputFormat format, const std::string& request) {
+    std::string handleCommand(IPC::Socket1::eOutputFormat format, const std::string& request) {
         std::stringstream        ss{request};
         std::vector<std::string> args;
         for (std::string tok; ss >> tok;)
@@ -172,7 +174,7 @@ namespace {
             return statusText();
 
         if (sub == "version") {
-            if (format == FORMAT_JSON)
+            if (format == IPC::Socket1::FORMAT_JSON)
                 return std::format(R"({{"version": "{}", "abi": "{}", "runtimeAbi": "{}", "path": "{}", "loadedMtime": {}}})", HWA_VERSION, HWA_BUILD_ABI,
                                    jsonEscape(__hyprland_api_get_hash()), jsonEscape(pluginPath()), g_loadedMtime);
             return std::format("hypr-window-anim {}\nbuilt for {}\nrunning {}\npath {}", HWA_VERSION, HWA_BUILD_ABI, __hyprland_api_get_hash(), pluginPath());
@@ -219,35 +221,54 @@ namespace {
         return std::format("error: unknown subcommand '{}'", sub);
     }
 
-    std::string onHyprctl(eHyprCtlOutputFormat format, std::string request) {
+    IPC::Socket1::SResponse onHyprctl(const IPC::Socket1::SRequest& request) {
         std::string out;
-        guarded("hyprctl", [&] { out = handleCommand(format, request); });
+        guarded("hyprctl", [&] { out = handleCommand(request.format, request.command); });
         return out.empty() ? "error: internal error, see hyprland.log" : out;
     }
 
-    SDispatchResult dispatchClose(std::string arg) {
-        const auto w = Desktop::focusState()->window();
-        if (!w)
-            return {.success = false, .error = "no focused window"};
-
-        bool handled = false;
-        guarded("hwanim:close", [&] {
-            const auto effect = arg.empty() ? std::optional<std::string>{} : std::optional<std::string>{arg};
-            handled           = closer().onCloseRequest(w, effect);
-        });
-        if (!handled)
-            hooks::sendCloseOriginal(w);
-        return {};
+    std::optional<std::string> luaEffectArg(lua_State* L) {
+        if (lua_gettop(L) < 1 || lua_type(L, 1) != LUA_TSTRING)
+            return std::nullopt;
+        size_t len = 0;
+        const char* s = lua_tolstring(L, 1, &len);
+        return len ? std::optional<std::string>{std::string{s, len}} : std::nullopt;
     }
 
-    SDispatchResult dispatchPreview(std::string arg) {
-        const auto w = Desktop::focusState()->window();
-        if (!w)
-            return {.success = false, .error = "no focused window"};
+    // No lua_error: its longjmp would skip C++ destructors
+    int luaResult(lua_State* L, const std::string& error) {
+        lua_pushboolean(L, error.empty());
+        if (error.empty())
+            return 1;
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
 
-        bool ok = false;
-        guarded("hwanim:preview", [&] { ok = closer().preview(w, arg.empty() ? std::optional<std::string>{} : std::optional<std::string>{arg}); });
-        return ok ? SDispatchResult{} : SDispatchResult{.success = false, .error = "window not eligible"};
+    // hl.plugin.hwanim.close([effect]): replaces the hwanim:close dispatcher (gone in 0.57)
+    int luaClose(lua_State* L) {
+        std::string error;
+        guarded("hl.plugin.hwanim.close", [&] {
+            const auto w = Desktop::focusState()->window();
+            if (!w) {
+                error = "no focused window";
+                return;
+            }
+            if (!closer().onCloseRequest(w, luaEffectArg(L)))
+                hooks::sendCloseOriginal(w);
+        });
+        return luaResult(L, error);
+    }
+
+    int luaPreview(lua_State* L) {
+        std::string error;
+        guarded("hl.plugin.hwanim.preview", [&] {
+            const auto w = Desktop::focusState()->window();
+            if (!w)
+                error = "no focused window";
+            else if (!closer().preview(w, luaEffectArg(L)))
+                error = "window not eligible";
+        });
+        return luaResult(L, error);
     }
 
     // Also runs on failed init: Hyprland skips pluginExit then
@@ -257,9 +278,10 @@ namespace {
         watcher::stop();
         guarded("shutdown", [] { closer().flushAll(); });
         guarded("shutdown", [] {
-            // Last frame's pass is cleared only on next beginRender
             makeGLCurrent();
-            g_pHyprRenderer->m_renderPass.removeAllOfType(EFFECT_PASS_NAME);
+            // finishRender() clears the pass; be safe if a frame never finished
+            if (auto& ctx = g_pHyprRenderer->context(); !ctx.active())
+                ctx.m_pass.removeAllOfType(EFFECT_PASS_NAME);
             effects().clear();
             shaderCache().clear();
         });
@@ -299,13 +321,13 @@ namespace {
         }));
 
         if (!hooks::renderHookInstalled()) {
-            g_listeners.push_back(ev.render.stage.listen([](eRenderStage stage) {
-                if (g_unloading || stage != RENDER_POST_WINDOWS || g_pHyprRenderer->m_bRenderingSnapshot)
+            g_listeners.push_back(ev.render.stage.listen([](const Event::SRenderStageEvent& e) {
+                if (g_unloading || e.stage != RENDER_POST_WINDOWS || !e.context || !e.monitor)
                     return;
-                guarded("render.stage", [] {
-                    if (const auto m = g_pHyprRenderer->m_renderData.pMonitor.lock())
-                        effects().addPassElementsFallback(m);
-                });
+                auto& ctx = e.context->get();
+                if (ctx.m_renderingSnapshot || ctx.m_renderingCapture)
+                    return;
+                guarded("render.stage", [&] { effects().addPassElementsFallback(ctx, e.monitor); });
             }));
         }
 
@@ -335,9 +357,10 @@ namespace {
             });
         }));
 
-        g_command = HyprlandAPI::registerHyprCtlCommand(PHANDLE, SHyprCtlCommand{.name = "hwanim", .exact = false, .fn = onHyprctl});
-        HyprlandAPI::addDispatcherV2(PHANDLE, "hwanim:close", dispatchClose);
-        HyprlandAPI::addDispatcherV2(PHANDLE, "hwanim:preview", dispatchPreview);
+        g_command = HyprlandAPI::registerHyprCtlCommand(PHANDLE, IPC::Socket1::SCommand{.name = "hwanim", .match = IPC::Socket1::COMMAND_MATCH_PREFIX, .handler = onHyprctl});
+        // removed with the plugin on unload
+        if (!HyprlandAPI::addLuaFunction(PHANDLE, "hwanim", "close", luaClose) || !HyprlandAPI::addLuaFunction(PHANDLE, "hwanim", "preview", luaPreview))
+            logError("could not register hl.plugin.hwanim.* Lua functions");
     }
 }
 
